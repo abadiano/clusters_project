@@ -1,5 +1,4 @@
 ﻿import easyocr
-import re
 import cv2
 
 def resize_image(image_path, max_width=800):
