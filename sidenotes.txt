@@ -1,0 +1,11 @@
+PolicyDuration                  1
+MedicalUnderwritingFlag         1
+StandardCustom                  1
+SingleMulti                     1
+ProductID                       3
+ProductName                     3
+ProductGroup                    1
+Category                        1
+CoverageCode                    1
+CoverageName                    1
+UnderwriterName                 1

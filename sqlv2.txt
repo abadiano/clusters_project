@@ -1,0 +1,129 @@
+-- Define date range parameters  
+DECLARE @StartDate DATE = '2023-12-01';
+DECLARE @EndDate DATE = '2023-12-31';
+
+-- Extract Premium Data
+WITH PremiumData AS (
+    SELECT
+        p.PolicyNumber,
+        -- Keep raw dates for calculations
+        MIN(p.PurchaseDate) AS PurchaseDate,
+        MIN(p.EffectiveDate) AS EffectiveDate,
+        MAX(p.ExpiryDate) AS ExpiryDate,
+        -- Derived features
+        DATEDIFF(day, MIN(p.PurchaseDate), MIN(p.EffectiveDate)) AS TimeToEffective,
+        DATEDIFF(day, MIN(p.EffectiveDate), MAX(p.ExpiryDate)) AS PolicyDuration,
+        MONTH(MIN(p.PurchaseDate)) AS PurchaseMonth,
+        MONTH(MIN(p.EffectiveDate)) AS EffectiveMonth,
+        -- Other features
+        MAX(p.SellerName) AS SellerName,
+        MAX(p.SellerID) AS SellerID,
+        MAX(p.PolicyClient) AS PolicyClient,
+        MAX(p.PolicySourceSystemID) AS PolicySourceSystemID,
+        MAX(p.SalesChannel) AS SalesChannel,
+        MAX(p.ProductID) AS ProductID,
+        MAX(p.ProductName) AS ProductName,
+        MAX(p.ProductGroup) AS ProductGroup,
+        MAX(p.Category) AS Category,
+        MAX(p.StandardCustom) AS StandardCustom,
+        MAX(p.SingleMulti) AS SingleMulti,
+        MAX(p.MedicalUnderwritingFlag) AS MedicalUnderwritingFlag,
+        SUM(p.EarnedPremium) AS TotalEarnedPremium,
+        MAX(p.InsuredAge) AS InsuredAge,
+        MAX(p.CoverageCode) AS CoverageCode,
+        MAX(p.CoverageName) AS CoverageName,
+        MAX(p.InsuredProvince) AS InsuredProvince,
+        MAX(p.Destination) AS Destination,
+        MAX(p.UnderwriterName) AS UnderwriterName,
+        MAX(p.NumberOfInsured) AS NumberOfInsured,
+        -- Assign SellerPartnerID based on the new mapping logic
+        CASE 
+            WHEN MAX(p.PolicySourceSystemID) = '14' THEN MAX(p.SellerID)
+            WHEN MAX(p.PolicySourceSystemID) = '21' AND MAX(p.PolicyClient) LIKE 'POS%' THEN MAX(p.SellerID)
+            WHEN MAX(p.PolicySourceSystemID) = '21' AND MAX(p.PolicyClient) NOT LIKE 'POS%' THEN MAX(p.PolicyClient)
+            ELSE NULL
+        END AS SellerPartnerID
+    FROM [BIReporting_WARS].[clm].[fctLossRatio] p
+    WHERE p.EarnedPremium IS NOT NULL
+      AND (p.EffectiveDate <= @EndDate AND p.ExpiryDate >= @StartDate)
+    GROUP BY p.PolicyNumber
+),
+PremiumDataWithPartnerSegment AS (
+    SELECT
+        p.*,
+        COALESCE(ps.PartnerSegment, 'Unknown') AS PartnerSegment
+    FROM PremiumData p
+    OUTER APPLY (
+        SELECT TOP 1 st.PartnerSegment
+        FROM [BIReporting_WARS].[partner].[fctSeller] s
+        LEFT JOIN [BIReporting_WARS].[partner].[dimSellerType] st
+            ON s.SellerTypeId = st.Name
+            AND s.SourceSystemID = st.SourceSystemID  -- Added SourceSystemID to the join
+        WHERE s.SellerPartnerID = p.SellerPartnerID
+          AND s.RecordStatusCode = '1'               -- Added RecordStatusCode filter
+        ORDER BY CASE WHEN st.PartnerSegment IS NOT NULL THEN 0 ELSE 1 END
+    ) ps
+),
+-- Extract and Aggregate Claims Data
+ClaimsData AS (
+    SELECT
+        PolicyNumber,
+        COUNT(DISTINCT ClaimID) AS ClaimsFrequency,
+        SUM(TotalClaimAmountCAD) AS TotalClaimAmount,
+        AVG(TotalClaimAmountCAD) AS AverageClaimAmount,
+        -- Other claim features
+        SUM(ChargedAmountCAD) AS TotalChargedAmountCAD,
+        SUM(PaidAmountCAD) AS TotalPaidAmountCAD,
+        SUM(PPONetworkFeeCAD) AS TotalPPONetworkFeeCAD
+    FROM [BIReporting_WARS].[clm].[fctLossRatio]
+    WHERE ValidationDescription IS NOT NULL
+      AND PolicyNumber IN (SELECT PolicyNumber FROM PremiumData)
+    GROUP BY PolicyNumber
+)
+-- Combine Premium and Claims Data
+SELECT
+    p.PolicyNumber,
+    -- Derived features
+    p.PolicyDuration,
+    p.TimeToEffective,
+    p.PurchaseMonth,
+    p.EffectiveMonth,
+    -- Other features
+    p.NumberOfInsured,
+    p.MedicalUnderwritingFlag,
+    p.StandardCustom,
+    p.SingleMulti,
+    p.ProductID,
+    p.ProductName,
+    p.ProductGroup,
+    p.Category,
+    p.CoverageCode,
+    p.CoverageName,
+    p.InsuredAge,
+    p.InsuredProvince,
+    p.Destination,
+    p.UnderwriterName,
+    p.SellerName,
+    p.SalesChannel,
+    p.TotalEarnedPremium,
+    -- Include PartnerSegment
+    p.PartnerSegment,
+    ISNULL(c.ClaimsFrequency, 0) AS ClaimsFrequency,
+    ISNULL(c.TotalClaimAmount, 0) AS TotalClaimAmount,
+    ISNULL(c.AverageClaimAmount, 0) AS AverageClaimAmount,
+    ISNULL(c.TotalChargedAmountCAD, 0) AS TotalChargedAmountCAD,
+    ISNULL(c.TotalPaidAmountCAD, 0) AS TotalPaidAmountCAD,
+    ISNULL(c.TotalPPONetworkFeeCAD, 0) AS TotalPPONetworkFeeCAD,
+    -- Calculated Fields
+    CASE 
+        WHEN c.TotalPaidAmountCAD IS NOT NULL AND p.TotalEarnedPremium > 0 
+        THEN (c.TotalPaidAmountCAD / p.TotalEarnedPremium) 
+        ELSE 0 
+    END AS LossRatio,
+    CASE 
+        WHEN (p.TotalEarnedPremium - ISNULL(c.TotalPaidAmountCAD, 0)) >= 0 
+        THEN 1 
+        ELSE 0 
+    END AS IsProfitable
+FROM PremiumDataWithPartnerSegment p
+LEFT JOIN ClaimsData c ON p.PolicyNumber = c.PolicyNumber;

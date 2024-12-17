@@ -1,0 +1,102 @@
+-- Define date range parameters 
+DECLARE @StartDate DATE = '2023-01-01';
+DECLARE @EndDate DATE = '2023-12-31';
+
+-- Extract Premium Data
+WITH PremiumData AS (
+    SELECT
+        PolicyNumber,
+        -- Keep raw dates for calculations
+        MIN(PurchaseDate) AS PurchaseDate,
+        MIN(EffectiveDate) AS EffectiveDate,
+        MAX(ExpiryDate) AS ExpiryDate,
+        -- Derived features
+        DATEDIFF(day, MIN(PurchaseDate), MIN(EffectiveDate)) AS TimeToEffective,
+        DATEDIFF(day, MIN(EffectiveDate), MAX(ExpiryDate)) AS PolicyDuration,
+        MONTH(MIN(PurchaseDate)) AS PurchaseMonth,
+        MONTH(MIN(EffectiveDate)) AS EffectiveMonth,
+        -- Other features
+        MAX(SellerName) AS SellerName,
+        MAX(SalesChannel) AS SalesChannel,
+        MAX(ProductID) AS ProductID,
+        MAX(ProductName) AS ProductName,
+        MAX(ProductGroup) AS ProductGroup,
+        MAX(Category) AS Category,
+        MAX(StandardCustom) AS StandardCustom,
+        MAX(SingleMulti) AS SingleMulti,
+        MAX(MedicalUnderwritingFlag) AS MedicalUnderwritingFlag,
+        SUM(EarnedPremium) AS TotalEarnedPremium,
+        MAX(InsuredAge) AS InsuredAge,
+        MAX(CoverageCode) AS CoverageCode,
+        MAX(CoverageName) AS CoverageName,
+        MAX(InsuredProvince) AS InsuredProvince,
+        MAX(Destination) AS Destination,
+        MAX(UnderwriterName) AS UnderwriterName,
+        MAX(NumberOfInsured) AS NumberOfInsured
+    FROM [BIReporting_WARS].[clm].[fctLossRatio]
+    WHERE EarnedPremium IS NOT NULL
+      AND (EffectiveDate <= @EndDate AND ExpiryDate >= @StartDate)
+    GROUP BY PolicyNumber
+),
+-- Extract and Aggregate Claims Data
+ClaimsData AS (
+    SELECT
+        PolicyNumber,
+        COUNT(DISTINCT ClaimID) AS ClaimsFrequency,
+        SUM(TotalClaimAmountCAD) AS TotalClaimAmount,
+        AVG(TotalClaimAmountCAD) AS AverageClaimAmount,
+        -- Removed AverageTimeToClaim and AverageClaimDuration
+        SUM(ChargedAmountCAD) AS TotalChargedAmountCAD,
+        SUM(PaidAmountCAD) AS TotalPaidAmountCAD,
+        SUM(PPONetworkFeeCAD) AS TotalPPONetworkFeeCAD
+    FROM [BIReporting_WARS].[clm].[fctLossRatio]
+    WHERE ValidationDescription IS NOT NULL
+      AND PolicyNumber IN (SELECT PolicyNumber FROM PremiumData)
+    GROUP BY PolicyNumber
+)
+-- Combine Premium and Claims Data
+SELECT
+    p.PolicyNumber,
+    -- Derived features
+    p.PolicyDuration,
+    p.TimeToEffective,
+    p.PurchaseMonth,
+    p.EffectiveMonth,
+    -- Other features
+    p.NumberOfInsured,
+    p.MedicalUnderwritingFlag,
+    p.StandardCustom,
+    p.SingleMulti,
+    p.ProductID,
+    p.ProductName,
+    p.ProductGroup,
+    p.Category,
+    p.CoverageCode,
+    p.CoverageName,
+    p.InsuredAge,
+    p.InsuredProvince,
+    p.Destination,
+    p.UnderwriterName,
+    p.SellerName,
+    p.SalesChannel,
+    p.TotalEarnedPremium,
+    ISNULL(c.ClaimsFrequency, 0) AS ClaimsFrequency,
+    ISNULL(c.TotalClaimAmount, 0) AS TotalClaimAmount,
+    ISNULL(c.AverageClaimAmount, 0) AS AverageClaimAmount,
+    -- Removed AverageTimeToClaim and AverageClaimDuration
+    ISNULL(c.TotalChargedAmountCAD, 0) AS TotalChargedAmountCAD,
+    ISNULL(c.TotalPaidAmountCAD, 0) AS TotalPaidAmountCAD,
+    ISNULL(c.TotalPPONetworkFeeCAD, 0) AS TotalPPONetworkFeeCAD,
+    -- Calculated Fields
+    CASE 
+        WHEN c.TotalPaidAmountCAD IS NOT NULL AND p.TotalEarnedPremium > 0 
+        THEN (c.TotalPaidAmountCAD / p.TotalEarnedPremium) 
+        ELSE 0 
+    END AS LossRatio,
+    CASE 
+        WHEN (p.TotalEarnedPremium - ISNULL(c.TotalPaidAmountCAD, 0)) >= 0 
+        THEN 1 
+        ELSE 0 
+    END AS IsProfitable
+FROM PremiumData p
+LEFT JOIN ClaimsData c ON p.PolicyNumber = c.PolicyNumber;
